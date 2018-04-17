@@ -255,12 +255,13 @@ module Mongoid
       # @example Define a field.
       #   field :score, :type => Integer, :default => 0
       #
-      # @param [ Symbol ] name The name of the field.
-      # @param [ Hash ] options The options to pass to the field.
+      # @param [ Symbol ] name    The name of the field.
+      # @param [ Hash ]   options The options to pass to the field.
       #
-      # @option options [ Class ] :type The type of the field.
-      # @option options [ String ] :label The label for the field.
-      # @option options [ Object, Proc ] :default The field's default
+      # @option options [ Class ]          :type    The type of the field.
+      # @option options [ String ]         :label   The label for the field.
+      # @option options [ Object, Proc ]   :default The field's default
+      # @option options [ String, Symbol ] :access  The field's access control level
       #
       # @return [ Field ] The generated field
       def field(name, options = {})
@@ -271,6 +272,29 @@ module Mongoid
           subclass.add_field(named, options)
         end
         added
+      end
+
+
+      %w[private settable gettable].each do |access_level|
+        # Shorthands for setting the access option for a given field
+        #
+        # @example Define a field with an access level
+        #   private_field :name, type: String, default: ''
+        #
+        # @param [ Symbol ] name    The name of the field.
+        # @param [ Hash ]   options The options to pass to the field.
+        #
+        # @option options [ Class ]          :type    The type of the field.
+        # @option options [ String ]         :label   The label for the field.
+        # @option options [ Object, Proc ]   :default The field's default
+        # @option options [ String, Symbol ] :access  The field's access control level
+        #
+        # @return [ Field ] The generated field
+        define_method(:"#{access_level}_field") do |name, options|
+          options.merge!({ access: access_level })
+
+          field name, options
+        end
       end
 
       # Replace a field with a new type.
@@ -384,16 +408,18 @@ module Mongoid
       #
       # @since 2.0.0
       def create_accessors(name, meth, options = {})
-        field = fields[name]
+        access_level = (options[:access] || 'public').to_s
+        field        = fields[name]
 
-        create_field_getter(name, meth, field)
-        create_field_getter_before_type_cast(name, meth)
-        create_field_setter(name, meth, field)
-        create_field_check(name, meth)
+        create_field_getter(name, meth, field, access_level)
+        create_field_getter_before_type_cast(name, meth, access_level)
+        create_field_setter(name, meth, field, access_level)
+        create_field_check(name, meth, access_level)
 
         if options[:localize]
-          create_translations_getter(name, meth)
-          create_translations_setter(name, meth, field)
+          create_translations_getter(name, meth, access_level)
+          create_translations_setter(name, meth, field, access_level)
+
           localized_fields[name] = field
         end
       end
@@ -408,10 +434,13 @@ module Mongoid
       # @param [ Field ] field The field.
       #
       # @since 2.4.0
-      def create_field_getter(name, meth, field)
+      def create_field_getter(name, meth, field, access_level)
+        is_private = %w[private gettable].include?(access_level)
+
         generated_methods.module_eval do
           re_define_method(meth) do
             raw = read_raw_attribute(name)
+
             if lazy_settable?(field, raw)
               write_attribute(name, field.eval_default(self))
             else
@@ -420,6 +449,8 @@ module Mongoid
               value
             end
           end
+
+          private meth if is_private
         end
       end
 
@@ -434,15 +465,20 @@ module Mongoid
       # @param [ String ] meth The name of the method.
       #
       # @since 3.1.0
-      def create_field_getter_before_type_cast(name, meth)
+      def create_field_getter_before_type_cast(name, meth, access_level)
+        method_name = "#{meth}_before_type_cast"
+        is_private  = %w[private settable].include?(access_level)
+
         generated_methods.module_eval do
-          re_define_method("#{meth}_before_type_cast") do
+          re_define_method(method_name) do
             if has_attribute_before_type_cast?(name)
               read_attribute_before_type_cast(name)
             else
               send meth
             end
           end
+
+          private method_name if is_private
         end
       end
 
@@ -456,15 +492,20 @@ module Mongoid
       # @param [ Field ] field The field.
       #
       # @since 2.4.0
-      def create_field_setter(name, meth, field)
+      def create_field_setter(name, meth, field, access_level)
+        method_name = "#{meth}="
+        is_private  = %w[private gettable].include?(access_level)
+
         generated_methods.module_eval do
-          re_define_method("#{meth}=") do |value|
+          re_define_method(method_name) do |value|
             val = write_attribute(name, value)
             if field.foreign_key?
               remove_ivar(field.association.name)
             end
             val
           end
+
+          private method_name if is_private
         end
       end
 
@@ -477,12 +518,17 @@ module Mongoid
       # @param [ String ] meth The name of the method.
       #
       # @since 2.4.0
-      def create_field_check(name, meth)
+      def create_field_check(name, meth, access_level)
+        method_name = "#{meth}?"
+        is_private  = %w[private settable].include?(access_level)
+
         generated_methods.module_eval do
-          re_define_method("#{meth}?") do
+          re_define_method(method_name) do
             value = read_raw_attribute(name)
             lookup_attribute_presence(name, value)
           end
+
+          private method_name if is_private
         end
       end
 
@@ -495,12 +541,22 @@ module Mongoid
       # @param [ String ] meth The name of the method.
       #
       # @since 2.4.0
-      def create_translations_getter(name, meth)
+      def create_translations_getter(name, meth, access_level)
+        method_name = "#{meth}_translations"
+        alias_name  = "#{meth}_t"
+        is_private  = %w[private settable].include?(access_level)
+
         generated_methods.module_eval do
-          re_define_method("#{meth}_translations") do
+          re_define_method(method_name) do
             (attributes[name] ||= {}).with_indifferent_access
           end
-          alias_method :"#{meth}_t", :"#{meth}_translations"
+
+          alias_method alias_name, method_name
+
+          if is_private
+            private method_name
+            private alias_name
+          end
         end
       end
 
@@ -514,9 +570,13 @@ module Mongoid
       # @param [ Field ] field The field.
       #
       # @since 2.4.0
-      def create_translations_setter(name, meth, field)
+      def create_translations_setter(name, meth, field, access_level)
+        method_name = "#{meth}_translations="
+        alias_name  = "#{meth}_t="
+        is_private  = %w[private gettable].include?(access_level)
+
         generated_methods.module_eval do
-          re_define_method("#{meth}_translations=") do |value|
+          re_define_method(method_name) do |value|
             attribute_will_change!(name)
             if value
               value.update_values do |_value|
@@ -525,7 +585,13 @@ module Mongoid
             end
             attributes[name] = value
           end
-          alias_method :"#{meth}_t=", :"#{meth}_translations="
+
+          alias_method alias_name, method_name
+
+          if is_private
+            private method_name
+            private alias_name
+          end
         end
       end
 

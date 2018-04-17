@@ -92,12 +92,19 @@ module Mongoid
       #
       # @since 2.0.0.rc.7
       def process_attribute(name, value)
-        if !respond_to?("#{name}=", true) && store_as = aliased_fields.invert[name.to_s]
-          name = store_as
-        end
-        responds = respond_to?("#{name}=", true)
-        raise Errors::UnknownAttribute.new(self.class, name) unless responds
-        send("#{name}=", value)
+        name_alias  = aliased_fields.invert[name.to_s]
+        method_name = "#{name_alias || name}="
+
+
+        return send method_name, value if respond_to? method_name
+
+        error_class = if respond_to?(method_name, true)
+                        Errors::PrivateField
+                      else
+                        Errors::UnknownAttribute
+                      end
+
+        raise error_class.new(self.class, method_name)
       end
 
       # Process all the pending nested attributes that needed to wait until
